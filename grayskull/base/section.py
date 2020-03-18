@@ -83,6 +83,12 @@ class Section:
     def __hash__(self) -> int:
         return hash(f"{self}-{[str(v) for v in self.values]}")
 
+    def __contains__(self, item: Union[str, "Section", "RecipeItem"]) -> bool:
+        for val in self.values:
+            if str(item) == str(val) or item == val:
+                return True
+        return False
+
     def __str__(self) -> str:
         return self.section_name
 
@@ -110,6 +116,8 @@ class Section:
             return str(self.section_name) == str(other)
         if isinstance(other, list) and isinstance(other[0], str):
             for pos, item in enumerate(self.values):
+                if pos + 1 > len(other):
+                    return False
                 if item.value != other[pos] and str(item.value) != other[pos]:
                     return False
             return True
@@ -129,13 +137,15 @@ class Section:
         return self.values[item]
 
     def __setitem__(self, key: str, value: Any):
-        if key not in self.yaml_obj:
+        if self.yaml_obj and key not in self.yaml_obj:
             self.add_subsection(key)
         if isinstance(value, (str, int)):
             self.yaml_obj[key] = CommentedSeq()
             self[key].add_item(value)
         elif isinstance(value, dict):
-            Section(key, self.yaml_obj)
+            section = Section(key, self.yaml_obj)
+            for key_sec, val_sec in value.items():
+                section[key_sec] = val_sec
 
     def add_subsection(self, section: Union[str, "Section"]):
         """Add a subsection to the current Section. If the current section has a
@@ -150,7 +160,7 @@ class Section:
             self._get_parent()[section.section_name] = section.yaml_obj
         return Section(section, parent_yaml=self.yaml_obj)
 
-    def add_item(self, item: Union[str, int]):
+    def add_item(self, item: Union[str, int, bool]):
         """Add a new item to the current section
 
         :param item: Receive the value for the current item
@@ -162,3 +172,23 @@ class Section:
     def add_items(self, items: List):
         for item in items:
             self.add_item(item)
+
+    def clear(self):
+        for val in self:
+            if isinstance(val, RecipeItem):
+                self._get_parent()[self.section_name] = CommentedSeq()
+                break
+            elif isinstance(val, Section):
+                if (self.section_name == "package" and val.section_name == "name") or (
+                    self.section_name == "build" and val.section_name == "number"
+                ):
+                    continue
+                val.clear()
+
+    def has_selectors(self) -> bool:
+        for item in self:
+            if isinstance(item, RecipeItem) and item.has_selector():
+                return True
+            if isinstance(item, Section) and item.has_selectors():
+                return True
+        return False

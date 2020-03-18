@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import sys
@@ -9,10 +8,8 @@ from grayskull.pypi import PyPi
 
 
 @pytest.fixture
-def pypi_metadata():
-    path_metadata = os.path.join(
-        os.path.dirname(__file__), "data", "pypi_pytest_metadata.json"
-    )
+def pypi_metadata(data_dir):
+    path_metadata = os.path.join(data_dir, "pypi_pytest_metadata.json")
     with open(path_metadata) as f:
         return json.load(f)
 
@@ -20,10 +17,10 @@ def pypi_metadata():
 def test_extract_pypi_requirements(pypi_metadata):
     recipe = PyPi(name="pytest", version="5.3.1")
     pypi_reqs = recipe._extract_requirements(pypi_metadata["info"])
-    assert sorted(pypi_reqs["host"]) == sorted(["python", "pip"])
+    assert sorted(pypi_reqs["host"]) == sorted(["python >=3.5", "pip"])
     assert sorted(pypi_reqs["run"]) == sorted(
         [
-            "python",
+            "python >=3.5",
             "py >=1.5.0",
             "packaging",
             "attrs >=17.4.0",
@@ -110,8 +107,7 @@ def test_get_selector():
     ],
 )
 def test_py_version_to_selector(requires_python, exp_selector):
-    metadata = {"requires_python": requires_python}
-    assert PyPi.py_version_to_selector(metadata) == f"# [py{exp_selector}]"
+    assert PyPi.py_version_to_selector(requires_python) == f"# [py{exp_selector}]"
 
 
 @pytest.mark.parametrize(
@@ -132,8 +128,7 @@ def test_py_version_to_selector(requires_python, exp_selector):
     ],
 )
 def test_py_version_to_limit_python(requires_python, exp_limit):
-    metadata = {"requires_python": requires_python}
-    assert PyPi.py_version_to_limit_python(metadata) == f"{exp_limit}"
+    assert PyPi.py_version_to_limit_python(requires_python) == f"{exp_limit}"
 
 
 def test_get_sha256_from_pypi_metadata():
@@ -265,7 +260,7 @@ def test_get_entry_points_from_sdist():
 def test_build_noarch_skip():
     recipe = PyPi(name="hypothesis", version="5.5.2")
     assert recipe["build"]["noarch"].values[0] == "python"
-    assert not recipe["build"]["skip"].values
+    assert "skip" not in recipe["build"]
 
 
 def test_run_requirements_sdist():
@@ -294,21 +289,6 @@ def test_format_host_requirements():
     assert sorted(
         PyPi._format_dependencies(["setuptools_scm [toml] >=3.4.1"], "pkg")
     ) == sorted(["setuptools_scm >=3.4.1"])
-
-
-def test_download_pkg_sdist(pkg_pytest):
-    with open(pkg_pytest, "rb") as pkg_file:
-        content = pkg_file.read()
-        pkg_sha256 = hashlib.sha256(content).hexdigest()
-    assert (
-        pkg_sha256 == "0d5fe9189a148acc3c3eb2ac8e1ac0742cb7618c084f3d228baaec0c254b318d"
-    )
-    setup_cfg = PyPi._get_setup_cfg(os.path.dirname(pkg_pytest))
-    assert setup_cfg["name"] == "pytest"
-    assert setup_cfg["python_requires"] == ">=3.5"
-    assert setup_cfg["entry_points"] == {
-        "console_scripts": ["pytest=pytest:main", "py.test=pytest:main"]
-    }
 
 
 def test_ciso_recipe():
@@ -366,8 +346,8 @@ def test_cythongsl_recipe_build():
 def test_requests_recipe_extra_deps():
     recipe = PyPi(name="requests", version="2.22.0")
     assert "win-inet-pton" not in recipe["requirements"]["run"]
-    assert recipe["build"]["noarch"]
     assert not recipe["build"]["skip"]
+    assert recipe["build"]["noarch"]
 
 
 def test_zipp_recipe_tags_on_deps():
@@ -381,7 +361,7 @@ def test_zipp_recipe_tags_on_deps():
 
 
 def test_generic_py_ver_to():
-    assert PyPi._generic_py_ver_to({"requires_python": ">=3.5, <3.8"}) == ">=3.5,<3.8"
+    assert PyPi._generic_py_ver_to(">=3.5, <3.8") == ">=3.5,<3.8"
 
 
 def test_botocore_recipe_license_name():
@@ -396,6 +376,18 @@ def test_get_test_entry_points():
     assert PyPi._get_test_entry_points(
         ["pytest = py.test:main", "py.test = py.test:main"]
     ) == ["pytest --help", "py.test --help"]
+
+
+def test_load_recipe(data_dir):
+    recipe = PyPi(load_recipe=os.path.join(data_dir, "recipes", "empty_gray.yaml"))
+    assert recipe["build"]["number"].values[0].value == 1
+    assert recipe.recipe.get_var_content(recipe["package"]["name"].values[0]) == "pkg1"
+    assert (
+        recipe.recipe.get_var_content(recipe["package"]["version"].values[0]) == "1.0.0"
+    )
+    assert recipe["source"]["sha256"].values[0] == "sha256_foo"
+    assert recipe["source"]["url"].values[0] == "URL"
+    assert recipe["extra"]["recipe-maintainers"].values == ["marcelotrevisani"]
 
 
 def test_importlib_metadata_two_setuptools_scm():
@@ -462,6 +454,49 @@ def test_mypy_deps_normalization_and_entry_points():
         "stubtest=mypy.stubtest:main",
         "dmypy=mypy.dmypy.client:console_entry",
     ]
+
+
+def test_update_section_load_recipe():
+    recipe = PyPi(name="pysal", version="2.0.0")
+    assert recipe["requirements"]["host"] == ["pip", "python >=3.6"]
+    assert recipe["requirements"]["run"] == sorted(
+        [
+            "python >=3.6",
+            "descartes",
+            "matplotlib",
+            "palettable",
+            "pandas",
+            "scipy >=0.11",
+            "seaborn",
+        ]
+    )
+    assert recipe["build"]["noarch"] == "python"
+
+    recipe.update("requirements", version="2.2.0")
+    assert recipe["build"]["noarch"] == "python"
+    assert recipe["requirements"]["host"] == ["pip", "python >=3.7"]
+    assert recipe["requirements"]["run"] == sorted(
+        [
+            "esda >=2.2.1",
+            "giddy >=2.3.0",
+            "inequality >=1.0.0",
+            "libpysal >=4.2.2",
+            "mapclassify >=2.2.0",
+            "mgwr >=2.1.1",
+            "pointpats >=2.1.0",
+            "python >=3.7",
+            "python-dateutil <=2.8.0",
+            "segregation >=1.2.0",
+            "spaghetti >=1.4.1",
+            "spglm >=1.0.7",
+            "spint >=1.0.6",
+            "splot >=1.1.2",
+            "spreg >=1.0.4",
+            "spvcm >=0.3.0",
+            "tobler >=0.2.0",
+            "urllib3 <1.25",
+        ]
+    )
 
 
 @pytest.mark.skipif(

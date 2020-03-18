@@ -1,11 +1,11 @@
+import inspect
 import logging
 import os
 import re
-from abc import ABC, abstractmethod
 from copy import deepcopy
 from pathlib import Path
 from shutil import copyfile
-from typing import Any, List, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 
 from colorama import Fore
 from ruamel.yaml import YAML, CommentToken
@@ -19,9 +19,10 @@ from grayskull.base.section import Section
 yaml = YAML(typ="jinja2")
 yaml.indent(mapping=2, sequence=4, offset=2)
 yaml.width = 600
+log = logging.getLogger(__name__)
 
 
-class AbstractRecipeModel(ABC):
+class Recipe:
     ALL_SECTIONS = (
         "package",
         "source",
@@ -38,11 +39,19 @@ class AbstractRecipeModel(ABC):
         re.IGNORECASE | re.MULTILINE,
     )
 
-    def __init__(self, name=None, version=None, load_recipe: str = ""):
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        version: Optional[str] = None,
+        load_recipe: Optional[str] = None,
+    ):
+        self.__files_copy: List = []
         if load_recipe:
             with open(load_recipe, "r") as yaml_file:
                 self._yaml = yaml.load(yaml_file)
+            self._is_loaded = True
         else:
+            self._is_loaded = False
             self._yaml = yaml.load(
                 f'{{% set name = "{name}" %}}\n'
                 "package:\n    name: {{ name|lower }}\n"
@@ -53,9 +62,11 @@ class AbstractRecipeModel(ABC):
                 self.add_jinja_var("version", version)
                 self["package"]["version"] = "<{ version }}"
             self["build"]["number"] = 0
-            self.__files_copy: List = []
-            self.update_all_recipe()
-        super(AbstractRecipeModel, self).__init__()
+        super(Recipe, self).__init__()
+
+    @property
+    def is_loaded(self):
+        return self._is_loaded
 
     def __repr__(self) -> str:
         name = self.get_var_content(self["package"]["name"].values[0])
@@ -106,10 +117,6 @@ class AbstractRecipeModel(ABC):
             )
         )
 
-    def update_all_recipe(self):
-        for section in self.ALL_SECTIONS:
-            self.refresh_section(section)
-
     def get_jinja_var(self, key: str) -> str:
         if not self._yaml.ca.comment and not self._yaml.ca.comment[1]:
             raise ValueError(f"Key {key} does not exist")
@@ -123,7 +130,7 @@ class AbstractRecipeModel(ABC):
 
     def __find_commented_token_jinja_var(self, key: str) -> Optional[CommentToken]:
         for comment in self._yaml.ca.comment[1]:
-            match_jinja = AbstractRecipeModel.re_jinja_var.match(comment.value)
+            match_jinja = Recipe.re_jinja_var.match(comment.value)
             if match_jinja and match_jinja.groups()[0] == key:
                 return comment
         return None
@@ -138,10 +145,6 @@ class AbstractRecipeModel(ABC):
         else:
             self.add_jinja_var(key, value)
 
-    @abstractmethod
-    def refresh_section(self, section: str = "", **kwargs):
-        pass
-
     @property
     def yaml_obj(self) -> CommentedMap:
         return self._yaml
@@ -155,33 +158,47 @@ class AbstractRecipeModel(ABC):
             raise KeyError(f"Section {item} not found.")
 
     def __setitem__(self, item: str, value: Any):
+        old_version = self.get_var_content(self["package"]["version"].values[0])
         if item in self.ALL_SECTIONS:
             self._yaml[item] = value
         else:
             raise KeyError(f"Section {item} not found.")
+        if old_version != self.get_var_content(self["package"]["version"].values[0]):
+            self.set_var_content(self["build"]["number"], 0)
 
     def __iter__(self) -> Section:
         for section in self.ALL_SECTIONS:
             yield self[section]
 
+    def has_selectors(self) -> bool:
+        for section in self:
+            if section.has_selectors():
+                return True
+        return False
+
     def generate_recipe(
         self,
-        folder_path: Union[str, Path] = ".",
+        path: Union[str, Path] = ".",
         mantainers: Optional[List] = None,
         disable_extra: bool = False,
     ):
         """Write the recipe in a location. It will create a folder with the
         package name and the recipe will be there.
 
-        :param folder_path: Path to the folder
+        :param path: Path to the folder
         """
-        recipe_dir = Path(folder_path) / self.get_var_content(
-            self["package"]["name"].values[0]
-        )
-        logging.debug(f"Generating recipe on folder: {recipe_dir}")
-        if not recipe_dir.is_dir():
-            recipe_dir.mkdir()
-        recipe_path = recipe_dir / "meta.yaml"
+        if os.path.isfile(path):
+            logging.debug(f"Saving recipe on: {path}")
+            recipe_path = Path(path)
+            recipe_dir = os.path.dirname(path)
+        else:
+            recipe_dir = Path(path) / self.get_var_content(
+                self["package"]["name"].values[0]
+            )
+            logging.debug(f"Generating recipe on folder: {recipe_dir}")
+            if not recipe_dir.is_dir():
+                recipe_dir.mkdir()
+            recipe_path = recipe_dir / "meta.yaml"
 
         if not disable_extra:
             self._add_extra_section(mantainers)
@@ -206,6 +223,24 @@ class AbstractRecipeModel(ABC):
         return self._add_new_lines_after_section(result)
 
     def _add_new_lines_after_section(self, recipe_yaml: CommentedMap) -> CommentedMap:
+        if self.is_loaded:
+            if (
+                recipe_yaml.ca
+                and len(recipe_yaml.ca.comment) > 1
+                and recipe_yaml.ca.comment[1][-1].value
+            ):
+                find_new_line = re.match(
+                    r"\s+$", recipe_yaml.ca.comment[1][-1].value, re.MULTILINE
+                )
+                if find_new_line:
+                    recipe_yaml.ca.comment[1][-1].value = re.sub(
+                        r"\s+$", "\n\n\n", recipe_yaml.ca.comment[1][-1].value
+                    )
+                else:
+                    recipe_yaml.ca.comment[1][
+                        -1
+                    ].value = f"{recipe_yaml.ca.comment[1][-1].value}\n\n\n"
+            return recipe_yaml
         for section in recipe_yaml.keys():
             if section == "package":
                 recipe_yaml.yaml_set_comment_before_after_key(section, "\n\n\n")
@@ -246,3 +281,93 @@ class AbstractRecipeModel(ABC):
         else:
             section.add_item(metadata)
         return section
+
+    def clear_section(self, section: str):
+        self[section].clear()
+
+
+def update(*args: List) -> Callable:
+    def decorator_func(method: Callable) -> Callable:
+        method.__gs_registry = args
+        return method
+
+    return decorator_func
+
+
+class MetaRecipeModel(type):
+    def __new__(cls, name, bases, dct):
+        dct["__getattr__"] = MetaRecipeModel.get_attr
+        dct["__getitem__"] = MetaRecipeModel.get_item
+        dct["__setitem__"] = MetaRecipeModel.set_item
+        dct[MetaRecipeModel.update.__name__] = MetaRecipeModel.update
+        dct[MetaRecipeModel.update_all.__name__] = MetaRecipeModel.update_all
+        dct["__init__"] = __init_metaclass__(dct.get("__init__"))
+        dct["recipe"] = property(lambda cls_recipe: cls_recipe._recipe)
+        recipe = super().__new__(cls, name, bases, dct)
+
+        registry = {}
+        attrs = dict(recipe.__dict__)
+        for key, val in attrs.items():
+            section_update = getattr(val, "__gs_registry", [])
+            if section_update:
+                for section in section_update:
+                    registry[section] = getattr(recipe, key)
+        recipe._registry_update = registry
+        return recipe
+
+    def update(cls, *args, version: Optional[str] = None):
+        if version:
+            cls.recipe.set_var_content(
+                cls.recipe["package"]["version"].values[0], version
+            )
+        for section in args:
+            if section == "teardown":
+                continue
+            func_reg = cls._registry_update[section]
+            if cls.recipe[section].values and section != "package":
+                cls.recipe.clear_section(section)
+            if section not in cls._registry_update:
+                continue
+            if "section" in inspect.signature(func_reg).parameters:
+                cls._registry_update[section](cls, section=section)
+            else:
+                cls._registry_update[section](cls)
+        if "teardown" in cls._registry_update.keys():
+            cls._registry_update["teardown"](cls)
+
+    def update_all(cls):
+        MetaRecipeModel.update(cls, *(cls._registry_update.keys()))
+
+    def get_attr(cls, item: str) -> Any:
+        if item in cls.recipe.ALL_SECTIONS:
+            return MetaRecipeModel.get_item(cls, item)
+        return getattr(cls.recipe, item)
+
+    def get_item(cls, item: str) -> Any:
+        return cls.recipe[item]
+
+    def set_item(cls, item: str, value: Any):
+        cls.recipe[item] = value
+
+
+def __init_metaclass__(method_init: Optional[Callable]):
+    def wrapper(
+        cls,
+        name: Optional[str] = None,
+        version: Optional[str] = None,
+        load_recipe: Union[str, Recipe] = None,
+        **kwargs,
+    ):
+        if isinstance(load_recipe, Recipe):
+            cls._recipe = load_recipe
+        else:
+            cls._recipe = Recipe(name, version, load_recipe)
+        cls._pkg_name = name
+        if method_init:
+            method_init(
+                cls, name=name, version=version, load_recipe=load_recipe, **kwargs
+            )
+        if not load_recipe:
+            cls.update_all()
+
+    return wrapper
